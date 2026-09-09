@@ -174,7 +174,6 @@ A few non-obvious problems encountered while building this, documented for anyon
 **Daud Abdi**
 
 📧 daudsaidabdi@gmail.com
-📱 07389 766509
 🔗 [github.com/Daudsaid](https://github.com/Daudsaid)
 🔗 [linkedin.com/in/daudabdi0506](https://linkedin.com/in/daudabdi0506)
 🌐 [daudabdi.com](https://daudabdi.com)

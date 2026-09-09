@@ -33,6 +33,7 @@ def load_current_flights():
                baro_altitude_m, velocity_ms, heading_deg, on_ground, updated_at
         FROM current_flights
         WHERE longitude IS NOT NULL AND latitude IS NOT NULL
+          AND updated_at > now() - interval '5 minutes'
         ORDER BY updated_at DESC
     """
     return pd.read_sql(query, conn)
@@ -74,15 +75,17 @@ view_state = pdk.ViewState(
 
 tooltip = {
     "html": "<b>{callsign}</b><br/>"
-            "Altitude: {altitude_ft} ft<br/>"
-            "Speed: {speed_kts} kts<br/>"
-            "Origin: {origin_country}",
+    "Altitude: {altitude_ft} ft<br/>"
+    "Speed: {speed_kts} kts<br/>"
+    "Origin: {origin_country}",
     "style": {"backgroundColor": "steelblue", "color": "white"},
 }
 
-st.pydeck_chart(pdk.Deck(
-    layers=[layer],
-    initial_view_state=view_state,
-    tooltip=tooltip,
-    map_style=None,
-))
+st.pydeck_chart(
+    pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style=None,
+    )
+)
