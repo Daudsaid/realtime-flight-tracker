@@ -106,11 +106,14 @@ def live_view():
         data=df,
         get_position=["longitude", "latitude"],
         get_radius=200,
+        radius_min_pixels=5,
         get_fill_color=[255, 90, 0, 180],
         pickable=True,
     )
 
-    view_state = pdk.ViewState(latitude=LONDON_LAT, longitude=LONDON_LON, zoom=8, pitch=0)
+    view_state = pdk.ViewState(
+        latitude=LONDON_LAT, longitude=LONDON_LON, zoom=8, pitch=0
+    )
 
     tooltip = {
         "html": "<b>{callsign}</b><br/>"
@@ -121,11 +124,27 @@ def live_view():
     }
 
     st.pydeck_chart(
-        pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip, map_style=None)
+        pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip=tooltip,
+            map_style=None,
+        )
     )
 
     st.dataframe(
-        df[["callsign", "icao24", "origin_country", "altitude_ft", "speed_kts", "heading_deg", "on_ground", "updated_at"]],
+        df[
+            [
+                "callsign",
+                "icao24",
+                "origin_country",
+                "altitude_ft",
+                "speed_kts",
+                "heading_deg",
+                "on_ground",
+                "updated_at",
+            ]
+        ],
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -136,10 +155,14 @@ def live_view():
             "speed_kts": st.column_config.NumberColumn("Speed (kts)", format="%d"),
             "heading_deg": st.column_config.NumberColumn("Heading (°)", format="%.0f"),
             "on_ground": "On ground",
-            "updated_at": st.column_config.DatetimeColumn("Last update", format="HH:mm:ss"),
+            "updated_at": st.column_config.DatetimeColumn(
+                "Last update", format="HH:mm:ss"
+            ),
         },
     )
-    st.caption(f"Refreshes every {REFRESH_SECONDS}s. Showing aircraft seen in the last {STALE_AFTER_MINUTES} minutes.")
+    st.caption(
+        f"Refreshes every {REFRESH_SECONDS}s. Showing aircraft seen in the last {STALE_AFTER_MINUTES} minutes."
+    )
 
 
 live_view()
