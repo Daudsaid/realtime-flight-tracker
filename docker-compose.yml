@@ -4,6 +4,7 @@ services:
     container_name: kafka
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -39,7 +40,7 @@ services:
   producer:
     build: ./producer
     container_name: flights-producer
-    restart: on-failure:10
+    restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: flights
@@ -52,16 +53,21 @@ services:
   consumer:
     build: ./consumer
     container_name: flights-consumer
-    restart: on-failure:10
+    restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: flights
-      KAFKA_GROUP_ID: flight-consumer-group
+      # Set DATABASE_URL in .env to write to a hosted Postgres (e.g. Neon) instead
+      # of the local container. Leave it unset to use the local database.
+      DATABASE_URL: ${DATABASE_URL:-}
+      HISTORY_RETENTION_HOURS: ${HISTORY_RETENTION_HOURS:-24}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: flights
       POSTGRES_USER: flights
       POSTGRES_PASSWORD: flights
+    volumes:
+      - ./sql/init.sql:/app/init.sql:ro
     depends_on:
       - kafka
       - postgres
@@ -72,6 +78,7 @@ services:
     ports:
       - "8501:8501"
     environment:
+      DATABASE_URL: ${DATABASE_URL:-}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: flights

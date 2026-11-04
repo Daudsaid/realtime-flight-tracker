@@ -66,3 +66,12 @@ def test_accepts_boundary_coordinates():
 def test_allows_null_optional_fields():
     record = make_record(callsign=None, velocity_ms=None, vertical_rate=None)
     assert is_valid(record) is True
+
+
+def test_normalize_fills_missing_optional_fields():
+    from consumer import normalize, COLUMNS
+
+    record = normalize({"icao24": "abc123", "latitude": 51.0, "longitude": 0.0, "extra": 1})
+    assert set(record) == set(COLUMNS)
+    assert record["callsign"] is None
+    assert "extra" not in record

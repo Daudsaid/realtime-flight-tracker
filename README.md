@@ -17,12 +17,11 @@ OpenSky Network API --> Producer (Python) --> Kafka (KRaft) --> Consumer (Python
 ```
 
 ![Architecture diagram](docs/flight_pipeline_architecture.png)
-```
 
 **Data flow:**
 1. **Producer** authenticates with OpenSky via OAuth2 (client credentials flow), polls the `/states/all` endpoint every 30 seconds for a bounding box covering Greater London, and publishes each aircraft's state as a JSON message to the Kafka topic `flights`, keyed by `icao24` (the aircraft's unique transponder ID).
 2. **Kafka** (single-node, KRaft mode — no ZooKeeper) buffers the stream and decouples the producer from the consumer.
-3. **Consumer** reads from the `flights` topic and writes each valid record to two Postgres tables: an append-only history log and an upserted "latest known state per aircraft" table.
+3. **Consumer** reads from the `flights` topic in batches and writes each valid record to two Postgres tables: an append-only history log and an upserted "latest known state per aircraft" table. The Kafka offset of each batch is stored in Postgres in the same transaction, so restarts neither replay nor skip messages.
 4. **Streamlit dashboard** queries the current-state table and renders live aircraft positions on an interactive map, with metrics and a sortable data table, auto-refreshing every 30 seconds.
 
 ## Tech Stack
@@ -41,7 +40,8 @@ OpenSky Network API --> Producer (Python) --> Kafka (KRaft) --> Consumer (Python
 ```
 flight-pipeline/
 ├── docker-compose.yml       # Orchestrates all six services
-├── .env                     # OpenSky API credentials (not committed)
+├── .env                     # OpenSky credentials + optional DATABASE_URL (not committed)
+├── .env.example             # Template for .env
 ├── sql/
 │   └── init.sql             # Postgres schema (runs on first container start)
 ├── producer/
@@ -52,11 +52,12 @@ flight-pipeline/
 ├── consumer/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   └── consumer.py          # Kafka consume loop, validation, dual writes
+│   └── consumer.py          # Batched consume loop, validation, dual writes, offset tracking, history pruning
 ├── dashboard/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   └── app.py                # Streamlit map + metrics + data table
+│   ├── app.py                # Streamlit map + metrics + data table
+│   └── .streamlit/secrets.toml.example  # Template for Streamlit Cloud secrets
 ├── tests/
 │   ├── test_producer.py      # Unit tests for state_to_dict()
 │   └── test_consumer.py      # Unit tests for is_valid()
@@ -68,7 +69,10 @@ flight-pipeline/
 Two tables, serving different purposes:
 
 - **`flight_positions`** — append-only log. Every message consumed from Kafka is inserted as a new row, preserving the full history of every position observation.
-- **`current_flights`** — upserted, one row per aircraft (`icao24` as primary key). Always reflects each aircraft's most recently known state. This is what the dashboard queries, avoiding the need to aggregate the full history table on every page load.
+- **`current_flights`** — upserted, one row per aircraft (`icao24` as primary key). Always reflects each aircraft's most recently known state. This is what the dashboard queries, avoiding the need to aggregate the full history table on every page load. The upsert ignores observations older than the stored one, so out-of-order messages can't move an aircraft backwards.
+- **`kafka_offsets`** — the next Kafka offset to read per partition, committed atomically with each batch of flight rows.
+
+The consumer applies `sql/init.sql` on startup (every statement is `IF NOT EXISTS`), so a fresh database needs no manual setup. History older than `HISTORY_RETENTION_HOURS` (default 24) is pruned every 10 minutes, which keeps hosted free tiers within their storage limits.
 
 ## Getting Started
 
@@ -85,7 +89,7 @@ Two tables, serving different purposes:
    cd flight-pipeline
    ```
 
-2. Create a `.env` file in the project root with your OpenSky API credentials:
+2. Copy `.env.example` to `.env` and add your OpenSky API credentials:
    ```
    OPENSKY_CLIENT_ID=your_client_id_here
    OPENSKY_CLIENT_SECRET=your_client_secret_here
@@ -123,6 +127,33 @@ docker compose down
 docker compose down -v
 ```
 
+## Deploying the Dashboard to Streamlit Community Cloud
+
+Streamlit Community Cloud hosts only the dashboard. Postgres moves to a free hosted database ([Neon](https://neon.com)), and Kafka, the producer and the consumer keep running in Docker on your machine, writing to it:
+
+```
+Laptop (Docker): OpenSky → Producer → Kafka → Consumer ──► Neon Postgres ◄── Streamlit Community Cloud
+```
+
+The public dashboard shows live aircraft whenever the pipeline is running on your machine. When it isn't, the page says the pipeline is offline.
+
+1. **Create the database.** Sign up at [neon.com](https://neon.com) and create a project in the region closest to you (e.g. *AWS Europe West 2 (London)*). Copy the connection string from **Connect**. It looks like `postgresql://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require`.
+2. **Point the pipeline at it.** Add the connection string to your `.env`:
+   ```
+   DATABASE_URL=postgresql://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require
+   ```
+   Then restart: `docker compose up --build -d`. The consumer creates the tables on first start. Check with `docker compose logs -f consumer`, where you should see `Wrote N records` every 30 seconds.
+3. **Deploy the dashboard.** At [share.streamlit.io](https://share.streamlit.io), choose **Create app → Deploy a public app from GitHub** and set:
+   - Repository: `Daudsaid/realtime-flight-tracker`, branch `main`
+   - Main file path: `dashboard/app.py`
+   - **Advanced settings:** Python 3.12, and in **Secrets** paste:
+     ```toml
+     DATABASE_URL = "postgresql://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require"
+     ```
+4. Click **Deploy**. Streamlit installs `dashboard/requirements.txt` and gives you a public `*.streamlit.app` URL.
+
+**Free-tier notes:** Neon's free plan includes 0.5 GB of storage and 100 compute-hours a month per project. Keep the compute size at the minimum (0.25 CU) so the hours last longer. The 24-hour history retention keeps storage well under the limit. If you run the pipeline around the clock, you may run out of compute-hours before the month ends. Running it only while you're working avoids that.
+
 ## Testing
 
 Unit tests cover the two pure-logic functions in the pipeline — the producer's OpenSky state-vector transformation and the consumer's record validation. Kafka, Postgres, and HTTP I/O are intentionally not mocked or unit-tested here, since that logic is a thin wrapper around external services already exercised end-to-end by the running pipeline itself.
@@ -134,9 +165,9 @@ pip install -r producer/requirements.txt -r consumer/requirements.txt -r require
 PYTHONPATH=. python -m pytest tests/ -v
 ```
 
-**14 tests**, covering:
+**15 tests**, covering:
 - `producer/producer.py` — `state_to_dict()`: field mapping, callsign whitespace handling, blank/missing callsign, null coordinate preservation
-- `consumer/consumer.py` — `is_valid()`: required-field checks, non-dict input rejection, latitude/longitude range validation including exact boundary values (±90°/±180°)
+- `consumer/consumer.py` — `is_valid()`: required-field checks, non-dict input rejection, latitude/longitude range validation including exact boundary values (±90°/±180°); `normalize()`: missing optional fields are filled so one bad message can't break a batch
 
 ## Verification
 
@@ -159,7 +190,8 @@ A few non-obvious problems encountered while building this, documented for anyon
 - **Kafka dual-listener configuration.** A single `ADVERTISED_LISTENERS` pointing at `localhost` breaks inter-container connectivity — containers on the Docker network need to resolve the broker via its service name (`kafka`), not `localhost`. Solved with two named listeners: `PLAINTEXT://kafka:9092` for internal Docker traffic and `HOST://localhost:29092` for host-machine tools.
 - **`kafka-python` incompatibility with Python 3.12.** The original `kafka-python` package (last released 2020) fails to import under Python 3.12 due to changes in `importlib`. Fixed by switching to the actively maintained `kafka-python-ng` fork, a drop-in replacement under the same `kafka` import namespace.
 - **Startup race condition.** Kafka's KRaft broker takes a couple of seconds to become ready after the container starts; `depends_on` in Compose only guarantees container start order, not service readiness. Solved with a `restart: on-failure` policy on the producer and consumer, so they automatically retry until Kafka is actually accepting connections.
-- **Silent consumer group coordination hang.** Using a `group_id`-based `KafkaConsumer` caused the consumer to hang indefinitely during the JoinGroup/SyncGroup rebalance handshake, with no error output, due to a broker-version misdetection in the client library. Resolved by switching to manual partition assignment (`consumer.assign()` + `seek_to_beginning()`), which is appropriate here since there's only ever a single consumer instance and no need for dynamic rebalancing.
+- **Silent consumer group coordination hang.** Using a `group_id`-based `KafkaConsumer` caused the consumer to hang indefinitely during the JoinGroup/SyncGroup rebalance handshake, with no error output, due to a broker-version misdetection in the client library. Resolved by switching to manual partition assignment (`consumer.assign()`), which is appropriate here since there's only ever a single consumer instance and no need for dynamic rebalancing.
+- **Offset tracking without a consumer group.** Manual assignment means Kafka doesn't track progress, so the first version re-read the whole topic on every restart, duplicating history and briefly reviving long-departed aircraft on the map. Offsets are now stored in a Postgres `kafka_offsets` table and committed in the same transaction as each batch of rows. Restarts resume exactly where they stopped.
 
 ## Possible Extensions
 

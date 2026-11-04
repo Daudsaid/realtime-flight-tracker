@@ -28,3 +28,16 @@ CREATE TABLE IF NOT EXISTS current_flights (
     time_position   BIGINT,
     updated_at      TIMESTAMPTZ      NOT NULL DEFAULT now()
 );
+
+-- Next Kafka offset to read per partition. Written in the same transaction as
+-- the flight rows, so the consumer resumes exactly where it left off.
+CREATE TABLE IF NOT EXISTS kafka_offsets (
+    topic       TEXT    NOT NULL,
+    partition   INTEGER NOT NULL,
+    next_offset BIGINT  NOT NULL,
+    PRIMARY KEY (topic, partition)
+);
+
+-- Supports pruning old history and the dashboard's "seen in the last N minutes" filter.
+CREATE INDEX IF NOT EXISTS idx_flight_positions_ingested_at ON flight_positions (ingested_at);
+CREATE INDEX IF NOT EXISTS idx_current_flights_updated_at ON current_flights (updated_at);

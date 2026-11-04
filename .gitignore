@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 credentials.json
 .venv/
+.streamlit/secrets.toml
