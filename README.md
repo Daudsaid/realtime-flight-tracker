@@ -1,6 +1,8 @@
 # ✈️ Live Flight Tracker — London
 
-A real-time data engineering pipeline that tracks live aircraft over London, built end-to-end with a streaming architecture: **OpenSky Network API → Apache Kafka (KRaft mode) → PostgreSQL → Streamlit**. Runs entirely locally via Docker Compose.
+A real-time data engineering pipeline that tracks live aircraft over London, built end-to-end with a streaming architecture: **OpenSky Network API → Apache Kafka (KRaft mode) → PostgreSQL → Streamlit**. The pipeline runs locally via Docker Compose; the dashboard is deployed on Streamlit Community Cloud, reading from a hosted Neon Postgres.
+
+**🔴 Live demo: [realtime-flight-tracker.streamlit.app](https://realtime-flight-tracker.streamlit.app/)**. Shows live aircraft whenever the ingestion pipeline is running.
 
 ![Live Flight Tracker Dashboard](docs/screenshot-1.png)
 
@@ -43,7 +45,7 @@ flight-pipeline/
 ├── .env                     # OpenSky credentials + optional DATABASE_URL (not committed)
 ├── .env.example             # Template for .env
 ├── sql/
-│   └── init.sql             # Postgres schema (runs on first container start)
+│   └── init.sql             # Postgres schema (applied by the consumer on startup)
 ├── producer/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -60,13 +62,13 @@ flight-pipeline/
 │   └── .streamlit/secrets.toml.example  # Template for Streamlit Cloud secrets
 ├── tests/
 │   ├── test_producer.py      # Unit tests for state_to_dict()
-│   └── test_consumer.py      # Unit tests for is_valid()
+│   └── test_consumer.py      # Unit tests for is_valid() and normalize()
 └── docs/                     # Screenshots referenced in this README
 ```
 
 ## Database Schema
 
-Two tables, serving different purposes:
+Three tables, serving different purposes:
 
 - **`flight_positions`** — append-only log. Every message consumed from Kafka is inserted as a new row, preserving the full history of every position observation.
 - **`current_flights`** — upserted, one row per aircraft (`icao24` as primary key). Always reflects each aircraft's most recently known state. This is what the dashboard queries, avoiding the need to aggregate the full history table on every page load. The upsert ignores observations older than the stored one, so out-of-order messages can't move an aircraft backwards.
@@ -85,8 +87,8 @@ The consumer applies `sql/init.sql` on startup (every statement is `IF NOT EXIST
 
 1. Clone the repository:
    ```bash
-   git clone <your-repo-url>
-   cd flight-pipeline
+   git clone https://github.com/Daudsaid/realtime-flight-tracker.git
+   cd realtime-flight-tracker
    ```
 
 2. Copy `.env.example` to `.env` and add your OpenSky API credentials:
@@ -146,7 +148,7 @@ The public dashboard shows live aircraft whenever the pipeline is running on you
 3. **Deploy the dashboard.** At [share.streamlit.io](https://share.streamlit.io), choose **Create app → Deploy a public app from GitHub** and set:
    - Repository: `Daudsaid/realtime-flight-tracker`, branch `main`
    - Main file path: `dashboard/app.py`
-   - **Advanced settings:** Python 3.12, and in **Secrets** paste:
+   - **Advanced settings:** in **Secrets** paste:
      ```toml
      DATABASE_URL = "postgresql://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require"
      ```
@@ -189,8 +191,9 @@ A few non-obvious problems encountered while building this, documented for anyon
 
 - **Kafka dual-listener configuration.** A single `ADVERTISED_LISTENERS` pointing at `localhost` breaks inter-container connectivity — containers on the Docker network need to resolve the broker via its service name (`kafka`), not `localhost`. Solved with two named listeners: `PLAINTEXT://kafka:9092` for internal Docker traffic and `HOST://localhost:29092` for host-machine tools.
 - **`kafka-python` incompatibility with Python 3.12.** The original `kafka-python` package (last released 2020) fails to import under Python 3.12 due to changes in `importlib`. Fixed by switching to the actively maintained `kafka-python-ng` fork, a drop-in replacement under the same `kafka` import namespace.
-- **Startup race condition.** Kafka's KRaft broker takes a couple of seconds to become ready after the container starts; `depends_on` in Compose only guarantees container start order, not service readiness. Solved with a `restart: on-failure` policy on the producer and consumer, so they automatically retry until Kafka is actually accepting connections.
+- **Startup race condition.** Kafka's KRaft broker takes a couple of seconds to become ready after the container starts; `depends_on` in Compose only guarantees container start order, not service readiness. Solved with a `restart: unless-stopped` policy on the producer and consumer, so they automatically retry until Kafka is actually accepting connections.
 - **Silent consumer group coordination hang.** Using a `group_id`-based `KafkaConsumer` caused the consumer to hang indefinitely during the JoinGroup/SyncGroup rebalance handshake, with no error output, due to a broker-version misdetection in the client library. Resolved by switching to manual partition assignment (`consumer.assign()`), which is appropriate here since there's only ever a single consumer instance and no need for dynamic rebalancing.
+- **Dependency pins vs. the cloud runtime.** Streamlit Community Cloud builds on Python 3.13, where the originally pinned `psycopg2-binary==2.9.9` and `pandas==2.2.2` have no prebuilt wheels, so the deploy failed at install time. Bumped to `2.9.10` / `2.2.3`, which support both 3.12 (Docker) and 3.13 (cloud).
 - **Offset tracking without a consumer group.** Manual assignment means Kafka doesn't track progress, so the first version re-read the whole topic on every restart, duplicating history and briefly reviving long-departed aircraft on the map. Offsets are now stored in a Postgres `kafka_offsets` table and committed in the same transaction as each batch of rows. Restarts resume exactly where they stopped.
 
 ## Possible Extensions
